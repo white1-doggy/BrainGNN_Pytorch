@@ -8,8 +8,10 @@ import torch
 import torch.nn.functional as F
 from torch.optim import lr_scheduler
 from tensorboardX import SummaryWriter
+from torch.utils.data import Subset
 
 from imports.ABIDEDataset import ABIDEDataset
+from imports.hcp7task_dataset import HCP7TaskDataset
 from torch_geometric.data import DataLoader
 from net.braingnn import Network
 from imports.utils import train_val_test_split
@@ -46,6 +48,11 @@ parser.add_argument('--load_model', type=bool, default=False)
 parser.add_argument('--save_model', type=bool, default=True)
 parser.add_argument('--optim', type=str, default='Adam', help='optimization method: SGD, Adam')
 parser.add_argument('--save_path', type=str, default='./model/', help='path to save model')
+parser.add_argument('--dataset', type=str, default='ABIDE', help='dataset name: ABIDE or HCP7Task')
+parser.add_argument('--subject_list', type=str, default='', help='path to subject list file for HCP7Task')
+parser.add_argument('--task_config', type=str, default='', help='JSON path for HCP7Task task config')
+parser.add_argument('--atlas_path', type=str, default='', help='path to atlas nifti for ROI extraction')
+parser.add_argument('--roi_ids', type=str, default='', help='comma-separated ROI ids (optional)')
 opt = parser.parse_args()
 
 if not os.path.exists(opt.save_path):
@@ -65,14 +72,45 @@ writer = SummaryWriter(os.path.join('./log',str(fold)))
 
 ################## Define Dataloader ##################################
 
-dataset = ABIDEDataset(path,name)
-dataset.data.y = dataset.data.y.squeeze()
-dataset.data.x[dataset.data.x == float('inf')] = 0
+if opt.dataset == 'HCP7Task':
+    if not opt.subject_list:
+        raise ValueError('HCP7Task requires --subject_list')
+    if not opt.task_config:
+        raise ValueError('HCP7Task requires --task_config')
+    if not opt.atlas_path:
+        raise ValueError('HCP7Task requires --atlas_path')
 
-tr_index,val_index,te_index = train_val_test_split(fold=fold)
-train_dataset = dataset[tr_index]
-val_dataset = dataset[val_index]
-test_dataset = dataset[te_index]
+    with open(opt.subject_list, 'r', encoding='utf-8') as f:
+        subjects = [line.strip() for line in f.readlines() if line.strip()]
+
+    roi_ids = None
+    if opt.roi_ids:
+        roi_ids = [int(val) for val in opt.roi_ids.split(',') if val.strip()]
+
+    dataset = HCP7TaskDataset(
+        root=path,
+        subject_dict=subjects,
+        task_config=opt.task_config,
+        atlas_path=opt.atlas_path,
+        roi_ids=roi_ids,
+    )
+    split_ratio = [0.7, 0.1, 0.2]
+    indices = np.arange(len(dataset))
+    np.random.shuffle(indices)
+    train_end = int(len(indices) * split_ratio[0])
+    val_end = train_end + int(len(indices) * split_ratio[1])
+    train_dataset = Subset(dataset, indices[:train_end])
+    val_dataset = Subset(dataset, indices[train_end:val_end])
+    test_dataset = Subset(dataset, indices[val_end:])
+else:
+    dataset = ABIDEDataset(path, name)
+    dataset.data.y = dataset.data.y.squeeze()
+    dataset.data.x[dataset.data.x == float('inf')] = 0
+
+    tr_index, val_index, te_index = train_val_test_split(fold=fold)
+    train_dataset = dataset[tr_index]
+    val_dataset = dataset[val_index]
+    test_dataset = dataset[te_index]
 
 
 train_loader = DataLoader(train_dataset,batch_size=opt.batchSize, shuffle= True)
@@ -253,4 +291,3 @@ else:
    print("===========================")
    print("Test Acc: {:.7f}, Test Loss: {:.7f} ".format(test_accuracy, test_l))
    print(opt)
-
