@@ -160,6 +160,7 @@ class HCP7TaskDataset(Dataset):
         num_rois = roi_num.shape[1]
 
         device = fmri_data.device
+        roi_num = roi_num.to(device)
         fmri_data = fmri_data.float()
         fmri_flat = fmri_data.view(batch_size, depth * height * width, time_len)
         atlas = self.template_data.to(device).view(-1).long()

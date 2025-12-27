@@ -1,293 +1,401 @@
-import os
-import numpy as np
 import argparse
-import time
 import copy
+import os
+import time
 
+import numpy as np
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+import torch.npu
 import torch.nn.functional as F
-from torch.optim import lr_scheduler
 from tensorboardX import SummaryWriter
-from torch.utils.data import Subset
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim import lr_scheduler
+from torch.utils.data import DistributedSampler, Subset
+from torch_geometric.data import DataLoader
 
 from imports.ABIDEDataset import ABIDEDataset
 from imports.hcp7task_dataset import HCP7TaskDataset
-from torch_geometric.data import DataLoader
-from net.braingnn import Network
 from imports.utils import train_val_test_split
-from sklearn.metrics import classification_report, confusion_matrix
+from net.braingnn import Network
 
 torch.manual_seed(123)
 
 EPS = 1e-10
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--epoch', type=int, default=0, help='starting epoch')
-parser.add_argument('--n_epochs', type=int, default=100, help='number of epochs of training')
-parser.add_argument('--batchSize', type=int, default=100, help='size of the batches')
-parser.add_argument('--dataroot', type=str, default='/home/azureuser/projects/BrainGNN/data/ABIDE_pcp/cpac/filt_noglobal', help='root directory of the dataset')
-parser.add_argument('--fold', type=int, default=0, help='training which fold')
-parser.add_argument('--lr', type = float, default=0.01, help='learning rate')
-parser.add_argument('--stepsize', type=int, default=20, help='scheduler step size')
-parser.add_argument('--gamma', type=float, default=0.5, help='scheduler shrinking rate')
-parser.add_argument('--weightdecay', type=float, default=5e-3, help='regularization')
-parser.add_argument('--lamb0', type=float, default=1, help='classification loss weight')
-parser.add_argument('--lamb1', type=float, default=0, help='s1 unit regularization')
-parser.add_argument('--lamb2', type=float, default=0, help='s2 unit regularization')
-parser.add_argument('--lamb3', type=float, default=0.1, help='s1 entropy regularization')
-parser.add_argument('--lamb4', type=float, default=0.1, help='s2 entropy regularization')
-parser.add_argument('--lamb5', type=float, default=0.1, help='s1 consistence regularization')
-parser.add_argument('--layer', type=int, default=2, help='number of GNN layers')
-parser.add_argument('--ratio', type=float, default=0.5, help='pooling ratio')
-parser.add_argument('--indim', type=int, default=200, help='feature dim')
-parser.add_argument('--nroi', type=int, default=200, help='num of ROIs')
-parser.add_argument('--nclass', type=int, default=2, help='num of classes')
-parser.add_argument('--load_model', type=bool, default=False)
-parser.add_argument('--save_model', type=bool, default=True)
-parser.add_argument('--optim', type=str, default='Adam', help='optimization method: SGD, Adam')
-parser.add_argument('--save_path', type=str, default='./model/', help='path to save model')
-parser.add_argument('--dataset', type=str, default='ABIDE', help='dataset name: ABIDE or HCP7Task')
-parser.add_argument('--subject_list', type=str, default='', help='path to subject list file for HCP7Task')
-parser.add_argument('--task_config', type=str, default='', help='JSON path for HCP7Task task config')
-parser.add_argument('--atlas_path', type=str, default='', help='path to atlas nifti for ROI extraction')
-parser.add_argument('--roi_ids', type=str, default='', help='comma-separated ROI ids (optional)')
-opt = parser.parse_args()
-
-if not os.path.exists(opt.save_path):
-    os.makedirs(opt.save_path)
-
-#################### Parameter Initialization #######################
-path = opt.dataroot
-name = 'ABIDE'
-save_model = opt.save_model
-load_model = opt.load_model
-opt_method = opt.optim
-num_epoch = opt.n_epochs
-fold = opt.fold
-writer = SummaryWriter(os.path.join('./log',str(fold)))
-
-
-
-################## Define Dataloader ##################################
-
-if opt.dataset == 'HCP7Task':
-    if not opt.subject_list:
-        raise ValueError('HCP7Task requires --subject_list')
-    if not opt.task_config:
-        raise ValueError('HCP7Task requires --task_config')
-    if not opt.atlas_path:
-        raise ValueError('HCP7Task requires --atlas_path')
-
-    with open(opt.subject_list, 'r', encoding='utf-8') as f:
-        subjects = [line.strip() for line in f.readlines() if line.strip()]
-
-    roi_ids = None
-    if opt.roi_ids:
-        roi_ids = [int(val) for val in opt.roi_ids.split(',') if val.strip()]
-
-    dataset = HCP7TaskDataset(
-        root=path,
-        subject_dict=subjects,
-        task_config=opt.task_config,
-        atlas_path=opt.atlas_path,
-        roi_ids=roi_ids,
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epoch", type=int, default=0, help="starting epoch")
+    parser.add_argument(
+        "--n_epochs", type=int, default=100, help="number of epochs of training"
     )
-    split_ratio = [0.7, 0.1, 0.2]
-    indices = np.arange(len(dataset))
-    np.random.shuffle(indices)
-    train_end = int(len(indices) * split_ratio[0])
-    val_end = train_end + int(len(indices) * split_ratio[1])
-    train_dataset = Subset(dataset, indices[:train_end])
-    val_dataset = Subset(dataset, indices[train_end:val_end])
-    test_dataset = Subset(dataset, indices[val_end:])
-else:
-    dataset = ABIDEDataset(path, name)
-    dataset.data.y = dataset.data.y.squeeze()
-    dataset.data.x[dataset.data.x == float('inf')] = 0
+    parser.add_argument("--batchSize", type=int, default=100, help="size of the batches")
+    parser.add_argument(
+        "--dataroot",
+        type=str,
+        default="/home/azureuser/projects/BrainGNN/data/ABIDE_pcp/cpac/filt_noglobal",
+        help="root directory of the dataset",
+    )
+    parser.add_argument("--fold", type=int, default=0, help="training which fold")
+    parser.add_argument("--lr", type=float, default=0.01, help="learning rate")
+    parser.add_argument("--stepsize", type=int, default=20, help="scheduler step size")
+    parser.add_argument("--gamma", type=float, default=0.5, help="scheduler shrinking rate")
+    parser.add_argument("--weightdecay", type=float, default=5e-3, help="regularization")
+    parser.add_argument("--lamb0", type=float, default=1, help="classification loss weight")
+    parser.add_argument("--lamb1", type=float, default=0, help="s1 unit regularization")
+    parser.add_argument("--lamb2", type=float, default=0, help="s2 unit regularization")
+    parser.add_argument("--lamb3", type=float, default=0.1, help="s1 entropy regularization")
+    parser.add_argument("--lamb4", type=float, default=0.1, help="s2 entropy regularization")
+    parser.add_argument("--lamb5", type=float, default=0.1, help="s1 consistence regularization")
+    parser.add_argument("--layer", type=int, default=2, help="number of GNN layers")
+    parser.add_argument("--ratio", type=float, default=0.5, help="pooling ratio")
+    parser.add_argument("--indim", type=int, default=200, help="feature dim")
+    parser.add_argument("--nroi", type=int, default=200, help="num of ROIs")
+    parser.add_argument("--nclass", type=int, default=2, help="num of classes")
+    parser.add_argument("--load_model", type=bool, default=False)
+    parser.add_argument("--save_model", type=bool, default=True)
+    parser.add_argument(
+        "--optim", type=str, default="Adam", help="optimization method: SGD, Adam"
+    )
+    parser.add_argument("--save_path", type=str, default="./model/", help="path to save model")
+    parser.add_argument(
+        "--dataset", type=str, default="ABIDE", help="dataset name: ABIDE or HCP7Task"
+    )
+    parser.add_argument(
+        "--subject_list",
+        type=str,
+        default="",
+        help="path to subject list file for HCP7Task",
+    )
+    parser.add_argument(
+        "--task_config",
+        type=str,
+        default="",
+        help="JSON path for HCP7Task task config",
+    )
+    parser.add_argument(
+        "--atlas_path",
+        type=str,
+        default="",
+        help="path to atlas nifti for ROI extraction",
+    )
+    parser.add_argument(
+        "--roi_ids", type=str, default="", help="comma-separated ROI ids (optional)"
+    )
+    parser.add_argument("--ddp", action="store_true", help="enable NPU DDP training")
+    parser.add_argument(
+        "--devices",
+        type=int,
+        default=8,
+        help="number of NPUs to use when --ddp is enabled",
+    )
+    parser.add_argument("--master_addr", type=str, default="127.0.0.1")
+    parser.add_argument("--master_port", type=str, default="29501")
+    parser.add_argument("--amp", action="store_true", help="enable NPU AMP")
+    return parser.parse_args()
 
-    tr_index, val_index, te_index = train_val_test_split(fold=fold)
+
+def setup(rank, world_size, master_addr, master_port):
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["MASTER_ADDR"] = master_addr
+    os.environ["MASTER_PORT"] = master_port
+    dist.init_process_group(
+        backend="hccl",
+        init_method="env://",
+        world_size=world_size,
+        rank=rank,
+    )
+    torch.npu.set_device(rank)
+
+
+def cleanup():
+    dist.destroy_process_group()
+
+
+def build_datasets(opt):
+    if opt.dataset == "HCP7Task":
+        if not opt.subject_list:
+            raise ValueError("HCP7Task requires --subject_list")
+        if not opt.task_config:
+            raise ValueError("HCP7Task requires --task_config")
+        if not opt.atlas_path:
+            raise ValueError("HCP7Task requires --atlas_path")
+
+        with open(opt.subject_list, "r", encoding="utf-8") as f:
+            subjects = [line.strip() for line in f.readlines() if line.strip()]
+
+        roi_ids = None
+        if opt.roi_ids:
+            roi_ids = [int(val) for val in opt.roi_ids.split(",") if val.strip()]
+
+        dataset = HCP7TaskDataset(
+            root=opt.dataroot,
+            subject_dict=subjects,
+            task_config=opt.task_config,
+            atlas_path=opt.atlas_path,
+            roi_ids=roi_ids,
+        )
+        split_ratio = [0.7, 0.1, 0.2]
+        indices = np.arange(len(dataset))
+        np.random.shuffle(indices)
+        train_end = int(len(indices) * split_ratio[0])
+        val_end = train_end + int(len(indices) * split_ratio[1])
+        train_dataset = Subset(dataset, indices[:train_end])
+        val_dataset = Subset(dataset, indices[train_end:val_end])
+        test_dataset = Subset(dataset, indices[val_end:])
+        return train_dataset, val_dataset, test_dataset
+
+    dataset = ABIDEDataset(opt.dataroot, "ABIDE")
+    dataset.data.y = dataset.data.y.squeeze()
+    dataset.data.x[dataset.data.x == float("inf")] = 0
+
+    tr_index, val_index, te_index = train_val_test_split(fold=opt.fold)
     train_dataset = dataset[tr_index]
     val_dataset = dataset[val_index]
     test_dataset = dataset[te_index]
+    return train_dataset, val_dataset, test_dataset
 
 
-train_loader = DataLoader(train_dataset,batch_size=opt.batchSize, shuffle= True)
-val_loader = DataLoader(val_dataset, batch_size=opt.batchSize, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=opt.batchSize, shuffle=False)
+def build_loaders(opt, train_dataset, val_dataset, test_dataset, rank, world_size):
+    train_sampler = None
+    if opt.ddp:
+        train_sampler = DistributedSampler(
+            train_dataset, num_replicas=world_size, rank=rank, shuffle=True
+        )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=opt.batchSize,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
+    )
+    val_loader = DataLoader(val_dataset, batch_size=opt.batchSize, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=opt.batchSize, shuffle=False)
+    return train_loader, val_loader, test_loader, train_sampler
 
 
+def build_model(opt, device, rank):
+    model = Network(opt.indim, opt.ratio, opt.nclass).to(device)
+    if opt.ddp:
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+    return model
 
-############### Define Graph Deep Learning Network ##########################
-model = Network(opt.indim,opt.ratio,opt.nclass).to(device)
-print(model)
 
-if opt_method == 'Adam':
-    optimizer = torch.optim.Adam(model.parameters(), lr= opt.lr, weight_decay=opt.weightdecay)
-elif opt_method == 'SGD':
-    optimizer = torch.optim.SGD(model.parameters(), lr =opt.lr, momentum = 0.9, weight_decay=opt.weightdecay, nesterov = True)
+def build_optimizer(opt, model):
+    if opt.optim == "Adam":
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=opt.lr, weight_decay=opt.weightdecay
+        )
+    else:
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr=opt.lr,
+            momentum=0.9,
+            weight_decay=opt.weightdecay,
+            nesterov=True,
+        )
+    scheduler = lr_scheduler.StepLR(
+        optimizer, step_size=opt.stepsize, gamma=opt.gamma
+    )
+    return optimizer, scheduler
 
-scheduler = lr_scheduler.StepLR(optimizer, step_size=opt.stepsize, gamma=opt.gamma)
 
-############################### Define Other Loss Functions ########################################
-def topk_loss(s,ratio):
+def topk_loss(s, ratio):
     if ratio > 0.5:
-        ratio = 1-ratio
+        ratio = 1 - ratio
     s = s.sort(dim=1).values
-    res =  -torch.log(s[:,-int(s.size(1)*ratio):]+EPS).mean() -torch.log(1-s[:,:int(s.size(1)*ratio)]+EPS).mean()
+    res = -torch.log(s[:, -int(s.size(1) * ratio) :] + EPS).mean() - torch.log(
+        1 - s[:, : int(s.size(1) * ratio)] + EPS
+    ).mean()
     return res
 
 
-def consist_loss(s):
+def consist_loss(s, device):
     if len(s) == 0:
         return 0
     s = torch.sigmoid(s)
-    W = torch.ones(s.shape[0],s.shape[0])
-    D = torch.eye(s.shape[0])*torch.sum(W,dim=1)
-    L = D-W
-    L = L.to(device)
-    res = torch.trace(torch.transpose(s,0,1) @ L @ s)/(s.shape[0]*s.shape[0])
+    weight = torch.ones(s.shape[0], s.shape[0], device=device)
+    diag = torch.eye(s.shape[0], device=device) * torch.sum(weight, dim=1)
+    laplacian = diag - weight
+    res = torch.trace(torch.transpose(s, 0, 1) @ laplacian @ s) / (
+        s.shape[0] * s.shape[0]
+    )
     return res
 
-###################### Network Training Function#####################################
-def train(epoch):
-    print('train...........')
-    scheduler.step()
 
-    for param_group in optimizer.param_groups:
-        print("LR", param_group['lr'])
+def train_epoch(model, loader, optimizer, device, opt, scaler, writer, epoch, rank):
     model.train()
     s1_list = []
     s2_list = []
     loss_all = 0
     step = 0
-    for data in train_loader:
+
+    for data in loader:
         data = data.to(device)
         optimizer.zero_grad()
-        output, w1, w2, s1, s2 = model(data.x, data.edge_index, data.batch, data.edge_attr, data.pos)
-        s1_list.append(s1.view(-1).detach().cpu().numpy())
-        s2_list.append(s2.view(-1).detach().cpu().numpy())
 
-        loss_c = F.nll_loss(output, data.y)
+        with torch.npu.amp.autocast(enabled=opt.amp):
+            output, w1, w2, s1, s2 = model(
+                data.x, data.edge_index, data.batch, data.edge_attr, data.pos
+            )
+            s1_list.append(s1.view(-1).detach().cpu().numpy())
+            s2_list.append(s2.view(-1).detach().cpu().numpy())
 
-        loss_p1 = (torch.norm(w1, p=2)-1) ** 2
-        loss_p2 = (torch.norm(w2, p=2)-1) ** 2
-        loss_tpk1 = topk_loss(s1,opt.ratio)
-        loss_tpk2 = topk_loss(s2,opt.ratio)
-        loss_consist = 0
-        for c in range(opt.nclass):
-            loss_consist += consist_loss(s1[data.y == c])
-        loss = opt.lamb0*loss_c + opt.lamb1 * loss_p1 + opt.lamb2 * loss_p2 \
-                   + opt.lamb3 * loss_tpk1 + opt.lamb4 *loss_tpk2 + opt.lamb5* loss_consist
-        writer.add_scalar('train/classification_loss', loss_c, epoch*len(train_loader)+step)
-        writer.add_scalar('train/unit_loss1', loss_p1, epoch*len(train_loader)+step)
-        writer.add_scalar('train/unit_loss2', loss_p2, epoch*len(train_loader)+step)
-        writer.add_scalar('train/TopK_loss1', loss_tpk1, epoch*len(train_loader)+step)
-        writer.add_scalar('train/TopK_loss2', loss_tpk2, epoch*len(train_loader)+step)
-        writer.add_scalar('train/GCL_loss', loss_consist, epoch*len(train_loader)+step)
-        step = step + 1
+            loss_c = F.nll_loss(output, data.y)
+            loss_p1 = (torch.norm(w1, p=2) - 1) ** 2
+            loss_p2 = (torch.norm(w2, p=2) - 1) ** 2
+            loss_tpk1 = topk_loss(s1, opt.ratio)
+            loss_tpk2 = topk_loss(s2, opt.ratio)
+            loss_consist = 0
+            for c in range(opt.nclass):
+                loss_consist += consist_loss(s1[data.y == c], device)
+            loss = (
+                opt.lamb0 * loss_c
+                + opt.lamb1 * loss_p1
+                + opt.lamb2 * loss_p2
+                + opt.lamb3 * loss_tpk1
+                + opt.lamb4 * loss_tpk2
+                + opt.lamb5 * loss_consist
+            )
 
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
         loss_all += loss.item() * data.num_graphs
-        optimizer.step()
+        if writer is not None and rank == 0:
+            writer.add_scalar(
+                "train/classification_loss", loss_c, epoch * len(loader) + step
+            )
+            writer.add_scalar("train/unit_loss1", loss_p1, epoch * len(loader) + step)
+            writer.add_scalar("train/unit_loss2", loss_p2, epoch * len(loader) + step)
+            writer.add_scalar("train/TopK_loss1", loss_tpk1, epoch * len(loader) + step)
+            writer.add_scalar("train/TopK_loss2", loss_tpk2, epoch * len(loader) + step)
+            writer.add_scalar(
+                "train/GCL_loss", loss_consist, epoch * len(loader) + step
+            )
+        step += 1
 
-        s1_arr = np.hstack(s1_list)
-        s2_arr = np.hstack(s2_list)
-    return loss_all / len(train_dataset), s1_arr, s2_arr ,w1,w2
+    s1_arr = np.hstack(s1_list) if s1_list else np.array([])
+    s2_arr = np.hstack(s2_list) if s2_list else np.array([])
+    return loss_all / len(loader.dataset), s1_arr, s2_arr, w1, w2
 
 
-###################### Network Testing Function#####################################
-def test_acc(loader):
+def test_acc(model, loader, device):
     model.eval()
     correct = 0
     for data in loader:
         data = data.to(device)
-        outputs= model(data.x, data.edge_index, data.batch, data.edge_attr,data.pos)
+        outputs = model(data.x, data.edge_index, data.batch, data.edge_attr, data.pos)
         pred = outputs[0].max(dim=1)[1]
         correct += pred.eq(data.y).sum().item()
-
     return correct / len(loader.dataset)
 
-def test_loss(loader,epoch):
-    print('testing...........')
+
+def test_loss(model, loader, device, opt):
     model.eval()
     loss_all = 0
     for data in loader:
         data = data.to(device)
-        output, w1, w2, s1, s2= model(data.x, data.edge_index, data.batch, data.edge_attr,data.pos)
+        output, w1, w2, s1, s2 = model(
+            data.x, data.edge_index, data.batch, data.edge_attr, data.pos
+        )
         loss_c = F.nll_loss(output, data.y)
-
-        loss_p1 = (torch.norm(w1, p=2)-1) ** 2
-        loss_p2 = (torch.norm(w2, p=2)-1) ** 2
-        loss_tpk1 = topk_loss(s1,opt.ratio)
-        loss_tpk2 = topk_loss(s2,opt.ratio)
+        loss_p1 = (torch.norm(w1, p=2) - 1) ** 2
+        loss_p2 = (torch.norm(w2, p=2) - 1) ** 2
+        loss_tpk1 = topk_loss(s1, opt.ratio)
+        loss_tpk2 = topk_loss(s2, opt.ratio)
         loss_consist = 0
         for c in range(opt.nclass):
-            loss_consist += consist_loss(s1[data.y == c])
-        loss = opt.lamb0*loss_c + opt.lamb1 * loss_p1 + opt.lamb2 * loss_p2 \
-                   + opt.lamb3 * loss_tpk1 + opt.lamb4 *loss_tpk2 + opt.lamb5* loss_consist
-
+            loss_consist += consist_loss(s1[data.y == c], device)
+        loss = (
+            opt.lamb0 * loss_c
+            + opt.lamb1 * loss_p1
+            + opt.lamb2 * loss_p2
+            + opt.lamb3 * loss_tpk1
+            + opt.lamb4 * loss_tpk2
+            + opt.lamb5 * loss_consist
+        )
         loss_all += loss.item() * data.num_graphs
     return loss_all / len(loader.dataset)
 
-#######################################################################################
-############################   Model Training #########################################
-#######################################################################################
-best_model_wts = copy.deepcopy(model.state_dict())
-best_loss = 1e10
-for epoch in range(0, num_epoch):
-    since  = time.time()
-    tr_loss, s1_arr, s2_arr, w1, w2 = train(epoch)
-    tr_acc = test_acc(train_loader)
-    val_acc = test_acc(val_loader)
-    val_loss = test_loss(val_loader,epoch)
-    time_elapsed = time.time() - since
-    print('*====**')
-    print('{:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
-    print('Epoch: {:03d}, Train Loss: {:.7f}, '
-          'Train Acc: {:.7f}, Test Loss: {:.7f}, Test Acc: {:.7f}'.format(epoch, tr_loss,
-                                                       tr_acc, val_loss, val_acc))
 
-    writer.add_scalars('Acc',{'train_acc':tr_acc,'val_acc':val_acc},  epoch)
-    writer.add_scalars('Loss', {'train_loss': tr_loss, 'val_loss': val_loss},  epoch)
-    writer.add_histogram('Hist/hist_s1', s1_arr, epoch)
-    writer.add_histogram('Hist/hist_s2', s2_arr, epoch)
+def train_worker(rank, world_size, opt):
+    if opt.ddp:
+        setup(rank, world_size, opt.master_addr, opt.master_port)
 
-    if val_loss < best_loss and epoch > 5:
-        print("saving best model")
-        best_loss = val_loss
-        best_model_wts = copy.deepcopy(model.state_dict())
-        if save_model:
-            torch.save(best_model_wts, os.path.join(opt.save_path,str(fold)+'.pth'))
+    device = torch.device(f"npu:{rank}")
+    if not os.path.exists(opt.save_path) and rank == 0:
+        os.makedirs(opt.save_path)
+    writer = SummaryWriter(os.path.join("./log", str(opt.fold))) if rank == 0 else None
 
-#######################################################################################
-######################### Testing on testing set ######################################
-#######################################################################################
+    train_dataset, val_dataset, test_dataset = build_datasets(opt)
+    train_loader, val_loader, test_loader, train_sampler = build_loaders(
+        opt, train_dataset, val_dataset, test_dataset, rank, world_size
+    )
 
-if opt.load_model:
-    model = Network(opt.indim,opt.ratio,opt.nclass).to(device)
-    model.load_state_dict(torch.load(os.path.join(opt.save_path,str(fold)+'.pth')))
-    model.eval()
-    preds = []
-    correct = 0
-    for data in val_loader:
-        data = data.to(device)
-        outputs= model(data.x, data.edge_index, data.batch, data.edge_attr,data.pos)
-        pred = outputs[0].max(1)[1]
-        preds.append(pred.cpu().detach().numpy())
-        correct += pred.eq(data.y).sum().item()
-    preds = np.concatenate(preds,axis=0)
-    trues = val_dataset.data.y.cpu().detach().numpy()
-    cm = confusion_matrix(trues,preds)
-    print("Confusion matrix")
-    print(classification_report(trues, preds))
+    model = build_model(opt, device, rank)
+    optimizer, scheduler = build_optimizer(opt, model)
+    scaler = torch.npu.amp.GradScaler(enabled=opt.amp)
 
-else:
-   model.load_state_dict(best_model_wts)
-   model.eval()
-   test_accuracy = test_acc(test_loader)
-   test_l= test_loss(test_loader,0)
-   print("===========================")
-   print("Test Acc: {:.7f}, Test Loss: {:.7f} ".format(test_accuracy, test_l))
-   print(opt)
+    best_model_wts = copy.deepcopy(model.state_dict())
+    best_loss = 1e10
+
+    for epoch in range(opt.epoch, opt.n_epochs):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
+        tr_loss, s1_arr, s2_arr, w1, w2 = train_epoch(
+            model, train_loader, optimizer, device, opt, scaler, writer, epoch, rank
+        )
+        scheduler.step()
+
+        if rank == 0:
+            tr_acc = test_acc(model, train_loader, device)
+            val_acc = test_acc(model, val_loader, device)
+            val_loss = test_loss(model, val_loader, device, opt)
+
+            if writer is not None:
+                writer.add_scalar("train/acc", tr_acc, epoch)
+                writer.add_scalar("val/acc", val_acc, epoch)
+                writer.add_scalar("val/loss", val_loss, epoch)
+
+            if val_loss < best_loss:
+                best_loss = val_loss
+                best_model_wts = copy.deepcopy(model.state_dict())
+                if opt.save_model:
+                    torch.save(best_model_wts, os.path.join(opt.save_path, f"{opt.fold}.pth"))
+
+            print(
+                f"Epoch: {epoch} | Train Loss: {tr_loss:.6f} | "
+                f"Train Acc: {tr_acc:.6f} | Val Acc: {val_acc:.6f} | "
+                f"Val Loss: {val_loss:.6f}"
+            )
+
+    if rank == 0:
+        model.load_state_dict(best_model_wts)
+        test_accuracy = test_acc(model, test_loader, device)
+        test_l = test_loss(model, test_loader, device, opt)
+        print(f"Test Acc: {test_accuracy:.7f}, Test Loss: {test_l:.7f}")
+
+    if writer is not None:
+        writer.close()
+
+    if opt.ddp:
+        cleanup()
+
+
+def main():
+    opt = parse_args()
+    world_size = opt.devices if opt.ddp else 1
+    if opt.ddp:
+        mp.spawn(train_worker, args=(world_size, opt), nprocs=world_size, join=True)
+    else:
+        train_worker(0, world_size, opt)
+
+
+if __name__ == "__main__":
+    main()
