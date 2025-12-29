@@ -7,8 +7,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import torch.npu
 import torch.nn.functional as F
+import torch.cuda.amp
 from tensorboardX import SummaryWriter
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import lr_scheduler
@@ -89,7 +89,7 @@ def parse_args():
         "--devices",
         type=int,
         default=8,
-        help="number of NPUs to use when --ddp is enabled",
+        help="number of GPUs to use when --ddp is enabled",
     )
     parser.add_argument("--master_addr", type=str, default="127.0.0.1")
     parser.add_argument("--master_port", type=str, default="29501")
@@ -102,13 +102,15 @@ def setup(rank, world_size, master_addr, master_port):
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = master_port
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
     dist.init_process_group(
-        backend="hccl",
+        backend=backend,
         init_method="env://",
         world_size=world_size,
         rank=rank,
     )
-    torch.npu.set_device(rank)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(rank)
 
 
 def cleanup():
@@ -184,7 +186,8 @@ def build_loaders(opt, train_dataset, val_dataset, test_dataset, rank, world_siz
 def build_model(opt, device, rank):
     model = Network(opt.indim, opt.ratio, opt.nclass, R=opt.nroi).to(device)
     if opt.ddp:
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        device_ids = [rank] if device.type == "cuda" else None
+        model = DDP(model, device_ids=device_ids, find_unused_parameters=True)
     return model
 
 
@@ -241,7 +244,7 @@ def train_epoch(model, loader, optimizer, device, opt, scaler, writer, epoch, ra
         data = data.to(device)
         optimizer.zero_grad()
 
-        with torch.npu.amp.autocast(enabled=opt.amp):
+        with torch.cuda.amp.autocast(enabled=opt.amp):
             output, w1, w2, s1, s2 = model(
                 data.x, data.edge_index, data.batch, data.edge_attr, data.pos
             )
@@ -331,7 +334,11 @@ def train_worker(rank, world_size, opt):
     if opt.ddp:
         setup(rank, world_size, opt.master_addr, opt.master_port)
 
-    device = torch.device(f"npu:{rank}")
+    device = (
+        torch.device(f"cuda:{rank}")
+        if torch.cuda.is_available()
+        else torch.device("cpu")
+    )
     if not os.path.exists(opt.save_path) and rank == 0:
         os.makedirs(opt.save_path)
     writer = SummaryWriter(os.path.join("./log", str(opt.fold))) if rank == 0 else None
@@ -343,7 +350,7 @@ def train_worker(rank, world_size, opt):
 
     model = build_model(opt, device, rank)
     optimizer, scheduler = build_optimizer(opt, model)
-    scaler = torch.npu.amp.GradScaler(enabled=opt.amp)
+    scaler = torch.cuda.amp.GradScaler(enabled=opt.amp)
 
     best_model_wts = copy.deepcopy(model.state_dict())
     best_loss = 1e10
