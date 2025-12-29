@@ -82,6 +82,12 @@ def parse_args():
         help="path to atlas nifti for ROI extraction",
     )
     parser.add_argument(
+        "--fc_root",
+        type=str,
+        default="",
+        help="root directory of precomputed FC files for HCP7Task",
+    )
+    parser.add_argument(
         "--roi_ids", type=str, default="", help="comma-separated ROI ids (optional)"
     )
     parser.add_argument("--ddp", action="store_true", help="enable NPU DDP training")
@@ -123,8 +129,8 @@ def build_datasets(opt):
             raise ValueError("HCP7Task requires --subject_list")
         if not opt.task_config:
             raise ValueError("HCP7Task requires --task_config")
-        if not opt.atlas_path:
-            raise ValueError("HCP7Task requires --atlas_path")
+        if not opt.fc_root:
+            raise ValueError("HCP7Task requires --fc_root")
 
         with open(opt.subject_list, "r", encoding="utf-8") as f:
             subjects = [line.strip() for line in f.readlines() if line.strip()]
@@ -137,10 +143,11 @@ def build_datasets(opt):
             root=opt.dataroot,
             subject_dict=subjects,
             task_config=opt.task_config,
-            atlas_path=opt.atlas_path,
             roi_ids=roi_ids,
+            fc_root=opt.fc_root,
+            precomputed=True,
         )
-        opt.nroi = int(dataset.roi_ids.numel())
+        opt.nroi = int(dataset.num_rois)
         opt.indim = opt.nroi
         if opt.nclass == 2:
             opt.nclass = len(dataset.task_name_list)

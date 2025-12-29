@@ -25,9 +25,11 @@ class HCP7TaskDataset(Dataset):
         root,
         subject_dict,
         task_config,
-        atlas_path,
+        atlas_path=None,
         roi_ids=None,
         tr_sec=0.72,
+        fc_root=None,
+        precomputed=True,
     ):
         self.root = root
         self.subject_list = (
@@ -41,10 +43,25 @@ class HCP7TaskDataset(Dataset):
         self.task_fixed_tr = self.task_config["task_fixed_tr"]
         self.task_label_rules = self.task_config["task_label_rules"]
         self.global_fixed_tr = self.task_config["global_fixed_tr"]
-        self.template_data = self.get_atlas_data(atlas_path)
-        self.roi_ids = self._resolve_roi_ids(roi_ids)
+        self.precomputed = precomputed
+        self.fc_root = fc_root
 
-        self.samples = self._build_index()
+        if not self.precomputed:
+            if atlas_path is None:
+                raise ValueError("atlas_path is required when precomputed is False")
+            self.template_data = self.get_atlas_data(atlas_path)
+            self.roi_ids = self._resolve_roi_ids(roi_ids)
+        else:
+            self.template_data = None
+            self.roi_ids = None
+
+        if self.precomputed:
+            if self.fc_root is None:
+                raise ValueError("fc_root is required when precomputed is True")
+            self.samples = self._build_fc_index()
+        else:
+            self.samples = self._build_index()
+        self.num_rois = self._infer_num_rois()
 
     def _load_task_config(self, task_config):
         if isinstance(task_config, str):
@@ -111,6 +128,31 @@ class HCP7TaskDataset(Dataset):
                             }
                         )
 
+        return samples
+
+    def _build_fc_index(self):
+        samples = []
+        for task in self.task_name_list:
+            task_dir = os.path.join(self.fc_root, task)
+            if not os.path.exists(task_dir):
+                continue
+            for subject in os.listdir(task_dir):
+                subject_dir = os.path.join(task_dir, subject)
+                if not os.path.isdir(subject_dir):
+                    continue
+                fc_files = sorted(
+                    f
+                    for f in os.listdir(subject_dir)
+                    if f.endswith(".pt") and f.startswith("fc")
+                )
+                for fc_name in fc_files:
+                    samples.append(
+                        {
+                            "task": task,
+                            "subject": subject,
+                            "fc_path": os.path.join(subject_dir, fc_name),
+                        }
+                    )
         return samples
 
     # --------------------------------------------------
@@ -219,15 +261,17 @@ class HCP7TaskDataset(Dataset):
     def __getitem__(self, idx):
         item = self.samples[idx]
 
-        fmri = self._load_sequence(
-            subject_path=item["subject_path"],
-            start_tr=item["start_tr"],
-            length=item["task_tr"],
-        )
-        fmri = fmri.unsqueeze(0)  # [B, 1, D, H, W, T]
-
-        roi_signal = self.get_average_roi_signal(fmri, self.roi_ids)
-        fc = self._compute_fc(roi_signal[0])
+        if self.precomputed:
+            fc = torch.load(item["fc_path"])
+        else:
+            fmri = self._load_sequence(
+                subject_path=item["subject_path"],
+                start_tr=item["start_tr"],
+                length=item["task_tr"],
+            )
+            fmri = fmri.unsqueeze(0)  # [B, 1, D, H, W, T]
+            roi_signal = self.get_average_roi_signal(fmri, self.roi_ids)
+            fc = self._compute_fc(roi_signal[0])
 
         node_features = fc
         edge_weights = fc.abs().clone()
@@ -246,3 +290,11 @@ class HCP7TaskDataset(Dataset):
             pos=pos.float(),
             task=item["task"],
         )
+
+    def _infer_num_rois(self):
+        if not self.samples:
+            return 0
+        if self.precomputed:
+            sample_fc = torch.load(self.samples[0]["fc_path"])
+            return int(sample_fc.shape[0])
+        return int(self.roi_ids.numel())
