@@ -138,6 +138,10 @@ def build_datasets(opt):
             atlas_path=opt.atlas_path,
             roi_ids=roi_ids,
         )
+        opt.nroi = int(dataset.roi_ids.numel())
+        opt.indim = opt.nroi
+        if opt.nclass == 2:
+            opt.nclass = len(dataset.task_name_list)
         split_ratio = [0.7, 0.1, 0.2]
         indices = np.arange(len(dataset))
         np.random.shuffle(indices)
@@ -178,7 +182,7 @@ def build_loaders(opt, train_dataset, val_dataset, test_dataset, rank, world_siz
 
 
 def build_model(opt, device, rank):
-    model = Network(opt.indim, opt.ratio, opt.nclass).to(device)
+    model = Network(opt.indim, opt.ratio, opt.nclass, R=opt.nroi).to(device)
     if opt.ddp:
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
     return model
