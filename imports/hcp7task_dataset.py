@@ -132,27 +132,58 @@ class HCP7TaskDataset(Dataset):
 
     def _build_fc_index(self):
         samples = []
-        for task in self.task_name_list:
-            task_dir = os.path.join(self.fc_root, task)
-            if not os.path.exists(task_dir):
+        subject_set = set(self.subject_list)
+        for subject in os.listdir(self.fc_root):
+            if subject_set and subject not in subject_set:
                 continue
-            for subject in os.listdir(task_dir):
-                subject_dir = os.path.join(task_dir, subject)
-                if not os.path.isdir(subject_dir):
+            subject_dir = os.path.join(self.fc_root, subject)
+            if not os.path.isdir(subject_dir):
+                continue
+            for task in self.task_name_list:
+                task_dir = os.path.join(subject_dir, task)
+                if not os.path.isdir(task_dir):
                     continue
-                fc_files = sorted(
-                    f
-                    for f in os.listdir(subject_dir)
-                    if f.endswith(".pt") and f.startswith("fc")
-                )
-                for fc_name in fc_files:
-                    samples.append(
-                        {
-                            "task": task,
-                            "subject": subject,
-                            "fc_path": os.path.join(subject_dir, fc_name),
-                        }
-                    )
+                for run in os.listdir(task_dir):
+                    run_dir = os.path.join(task_dir, run)
+                    if not os.path.isdir(run_dir):
+                        continue
+                    label_dirs = [
+                        entry
+                        for entry in os.listdir(run_dir)
+                        if os.path.isdir(os.path.join(run_dir, entry))
+                    ]
+                    if label_dirs:
+                        for label in label_dirs:
+                            label_dir = os.path.join(run_dir, label)
+                            fc_files = sorted(
+                                f
+                                for f in os.listdir(label_dir)
+                                if f.endswith(".pt")
+                            )
+                            for fc_name in fc_files:
+                                samples.append(
+                                    {
+                                        "task": task,
+                                        "subject": subject,
+                                        "run": run,
+                                        "label": label,
+                                        "fc_path": os.path.join(label_dir, fc_name),
+                                    }
+                                )
+                    else:
+                        fc_files = sorted(
+                            f for f in os.listdir(run_dir) if f.endswith(".pt")
+                        )
+                        for fc_name in fc_files:
+                            samples.append(
+                                {
+                                    "task": task,
+                                    "subject": subject,
+                                    "run": run,
+                                    "label": None,
+                                    "fc_path": os.path.join(run_dir, fc_name),
+                                }
+                            )
         return samples
 
     # --------------------------------------------------
@@ -289,6 +320,9 @@ class HCP7TaskDataset(Dataset):
             y=torch.tensor(label, dtype=torch.long),
             pos=pos.float(),
             task=item["task"],
+            subject=item.get("subject"),
+            run=item.get("run"),
+            block_label=item.get("label"),
         )
 
     def _infer_num_rois(self):
