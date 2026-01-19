@@ -1,0 +1,126 @@
+{
+  "task_name_list": [
+    "WM",
+    "SOCIAL",
+    "EMOTION",
+    "MOTOR",
+    "LANGUAGE",
+    "RELATIONAL",
+    "GAMBLING"
+  ],
+  "task_name_to_id": {
+    "WM": 0,
+    "SOCIAL": 1,
+    "EMOTION": 2,
+    "MOTOR": 3,
+    "LANGUAGE": 4,
+    "RELATIONAL": 5,
+    "GAMBLING": 6
+  },
+  "num_tasks": 7,
+  "global_fixed_tr": 50,
+  "task_fixed_tr": {
+    "WM": 38,
+    "SOCIAL": 32,
+    "EMOTION": 25,
+    "MOTOR": 17,
+    "LANGUAGE": 50,
+    "RELATIONAL": 22,
+    "GAMBLING": 39
+  },
+  "task_label_rules": {
+    "WM": {
+      "evs": [
+        "0bk_faces",
+        "0bk_places",
+        "0bk_tools",
+        "0bk_body",
+        "2bk_faces",
+        "2bk_places",
+        "2bk_tools",
+        "2bk_body"
+      ],
+      "label_map": {
+        "0bk_faces": 0,
+        "0bk_places": 0,
+        "0bk_tools": 0,
+        "0bk_body": 0,
+        "2bk_faces": 1,
+        "2bk_places": 1,
+        "2bk_tools": 1,
+        "2bk_body": 1
+      },
+      "num_classes": 2
+    },
+    "SOCIAL": {
+      "evs": [
+        "mental",
+        "rnd"
+      ],
+      "label_map": {
+        "rnd": 0,
+        "mental": 1
+      },
+      "num_classes": 2
+    },
+    "EMOTION": {
+      "evs": [
+        "fear",
+        "neut"
+      ],
+      "label_map": {
+        "neut": 0,
+        "fear": 1
+      },
+      "num_classes": 2
+    },
+    "MOTOR": {
+      "evs": [
+        "lh",
+        "rh",
+        "lf",
+        "rf"
+      ],
+      "label_map": {
+        "lh": 0,
+        "rh": 1,
+        "lf": 0,
+        "rf": 1
+      },
+      "num_classes": 2
+    },
+    "LANGUAGE": {
+      "evs": [
+        "story",
+        "math"
+      ],
+      "label_map": {
+        "math": 0,
+        "story": 1
+      },
+      "num_classes": 2
+    },
+    "RELATIONAL": {
+      "evs": [
+        "match",
+        "relation"
+      ],
+      "label_map": {
+        "match": 0,
+        "relation": 1
+      },
+      "num_classes": 2
+    },
+    "GAMBLING": {
+      "evs": [
+        "loss",
+        "win"
+      ],
+      "label_map": {
+        "loss": 0,
+        "win": 1
+      },
+      "num_classes": 2
+    }
+  }
+}
