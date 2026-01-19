@@ -150,6 +150,32 @@ class HCP7TaskDataset(Dataset):
                 task_dir = os.path.join(subject_dir, task)
                 if not os.path.isdir(task_dir):
                     continue
+                label_dirs = [
+                    entry
+                    for entry in os.listdir(task_dir)
+                    if os.path.isdir(os.path.join(task_dir, entry))
+                ]
+                label_set = set(self.task_label_rules[task]["label_map"].keys())
+                task_has_label_dirs = any(label in label_set for label in label_dirs)
+                if task_has_label_dirs:
+                    for label in label_dirs:
+                        if label not in label_set:
+                            continue
+                        label_dir = os.path.join(task_dir, label)
+                        fc_files = sorted(
+                            f for f in os.listdir(label_dir) if f.endswith(".pt")
+                        )
+                        for fc_name in fc_files:
+                            samples.append(
+                                {
+                                    "task": task,
+                                    "subject": subject,
+                                    "run": None,
+                                    "label": label,
+                                    "fc_path": os.path.join(label_dir, fc_name),
+                                }
+                            )
+                    continue
                 for run in os.listdir(task_dir):
                     run_dir = os.path.join(task_dir, run)
                     if not os.path.isdir(run_dir):
@@ -163,9 +189,7 @@ class HCP7TaskDataset(Dataset):
                         for label in label_dirs:
                             label_dir = os.path.join(run_dir, label)
                             fc_files = sorted(
-                                f
-                                for f in os.listdir(label_dir)
-                                if f.endswith(".pt")
+                                f for f in os.listdir(label_dir) if f.endswith(".pt")
                             )
                             for fc_name in fc_files:
                                 samples.append(
