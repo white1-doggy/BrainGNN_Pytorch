@@ -64,6 +64,12 @@ def parse_args():
         "--dataset", type=str, default="ABIDE", help="dataset name: ABIDE or HCP7Task"
     )
     parser.add_argument(
+        "--task",
+        type=str,
+        default="",
+        help="HCP7Task task name (e.g. WM, SOCIAL) for binary classification",
+    )
+    parser.add_argument(
         "--subject_list",
         type=str,
         default="",
@@ -131,6 +137,8 @@ def build_datasets(opt):
             raise ValueError("HCP7Task requires --task_config")
         if not opt.fc_root:
             raise ValueError("HCP7Task requires --fc_root")
+        if not opt.task:
+            raise ValueError("HCP7Task requires --task for binary classification")
 
         with open(opt.subject_list, "r", encoding="utf-8") as f:
             subjects = [line.strip() for line in f.readlines() if line.strip()]
@@ -146,11 +154,11 @@ def build_datasets(opt):
             roi_ids=roi_ids,
             fc_root=opt.fc_root,
             precomputed=True,
+            task_name=opt.task,
         )
         opt.nroi = int(dataset.num_rois)
         opt.indim = opt.nroi
-        if opt.nclass == 2:
-            opt.nclass = len(dataset.task_name_list)
+        opt.nclass = 2
         split_ratio = [0.7, 0.1, 0.2]
         indices = np.arange(len(dataset))
         np.random.shuffle(indices)

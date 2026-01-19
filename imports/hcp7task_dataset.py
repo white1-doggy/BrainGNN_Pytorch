@@ -30,6 +30,7 @@ class HCP7TaskDataset(Dataset):
         tr_sec=0.72,
         fc_root=None,
         precomputed=True,
+        task_name=None,
     ):
         self.root = root
         self.subject_list = (
@@ -45,6 +46,7 @@ class HCP7TaskDataset(Dataset):
         self.global_fixed_tr = self.task_config["global_fixed_tr"]
         self.precomputed = precomputed
         self.fc_root = fc_root
+        self.task_name = task_name
 
         if not self.precomputed:
             if atlas_path is None:
@@ -86,6 +88,8 @@ class HCP7TaskDataset(Dataset):
 
         for subject in tqdm(self.subject_list, desc="Building HCP-7task index"):
             for task in self.task_name_list:
+                if self.task_name and task != self.task_name:
+                    continue
                 task_dir = os.path.join(self.root, subject, task)
                 if not os.path.exists(task_dir):
                     continue
@@ -114,7 +118,7 @@ class HCP7TaskDataset(Dataset):
                     if len(events) == 0:
                         continue
 
-                    for onset, duration, _ in events:
+                    for onset, duration, label in events:
                         start_tr = int(round(onset / self.tr_sec))
                         if start_tr < 0 or start_tr + fixed_tr > total_tr:
                             continue
@@ -125,6 +129,7 @@ class HCP7TaskDataset(Dataset):
                                 "start_tr": start_tr,
                                 "task": task,
                                 "task_tr": fixed_tr,
+                                "label": label,
                             }
                         )
 
@@ -140,6 +145,8 @@ class HCP7TaskDataset(Dataset):
             if not os.path.isdir(subject_dir):
                 continue
             for task in self.task_name_list:
+                if self.task_name and task != self.task_name:
+                    continue
                 task_dir = os.path.join(subject_dir, task)
                 if not os.path.isdir(task_dir):
                     continue
@@ -311,7 +318,20 @@ class HCP7TaskDataset(Dataset):
         edge_attr = edge_attr.view(-1, 1)
 
         pos = torch.eye(fc.size(0), device=fc.device)
-        label = self.task_config["task_name_to_id"][item["task"]]
+        task = item["task"]
+        label_name = item.get("label")
+        label_map = self.task_label_rules[task]["label_map"]
+        if label_name is None:
+            raise ValueError(
+                f"Missing label for task '{task}' at {item.get('fc_path')}. "
+                "Ensure FC files are stored under label directories."
+            )
+        label = label_map.get(label_name)
+        if label is None:
+            raise ValueError(
+                f"Unknown label '{label_name}' for task '{task}'. "
+                f"Valid labels: {sorted(label_map.keys())}"
+            )
 
         return Data(
             x=node_features.float(),
@@ -319,7 +339,7 @@ class HCP7TaskDataset(Dataset):
             edge_attr=edge_attr.float(),
             y=torch.tensor(label, dtype=torch.long),
             pos=pos.float(),
-            task=item["task"],
+            task=task,
             subject=item.get("subject"),
             run=item.get("run"),
             block_label=item.get("label"),
