@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.optim import lr_scheduler
 from tensorboardX import SummaryWriter
+from tqdm import tqdm
 
 from imports.ABIDEDataset import ABIDEDataset
 from imports.task_dataset import TaskGraphDataset, TASK_NAME_LIST
@@ -74,6 +75,7 @@ if opt.dataset == 'abide':
     dataset = ABIDEDataset(path, name)
     dataset.data.y = dataset.data.y.squeeze()
     dataset.data.x[dataset.data.x == float('inf')] = 0
+    print(f"Loaded ABIDE dataset with {len(dataset)} samples.")
 
     tr_index, val_index, te_index = train_val_test_split(fold=fold)
     train_dataset = dataset[tr_index]
@@ -83,6 +85,7 @@ else:
     if not opt.node_root or not opt.edge_root:
         raise ValueError("node_root and edge_root must be provided for task dataset.")
     dataset = TaskGraphDataset(opt.node_root, opt.edge_root, opt.task_name)
+    print(f"Loaded task dataset {opt.task_name} with {len(dataset)} samples.")
     tr_index, val_index, te_index = train_val_test_split_indices(len(dataset), fold=fold)
     train_dataset = [dataset[idx] for idx in tr_index]
     val_dataset = [dataset[idx] for idx in val_index]
@@ -137,8 +140,11 @@ def train(epoch):
     s1_list = []
     s2_list = []
     loss_all = 0
+    correct = 0
+    total = 0
     step = 0
-    for data in train_loader:
+    progress = tqdm(train_loader, desc=f"Train Epoch {epoch}", leave=False)
+    for data in progress:
         data = data.to(device)
         optimizer.zero_grad()
         output, w1, w2, s1, s2 = model(data.x, data.edge_index, data.batch, data.edge_attr, data.pos)
@@ -146,6 +152,9 @@ def train(epoch):
         s2_list.append(s2.view(-1).detach().cpu().numpy())
 
         loss_c = F.nll_loss(output, data.y)
+        preds = output.max(dim=1)[1]
+        correct += preds.eq(data.y).sum().item()
+        total += data.y.size(0)
 
         loss_p1 = (torch.norm(w1, p=2)-1) ** 2
         loss_p2 = (torch.norm(w2, p=2)-1) ** 2
@@ -170,7 +179,9 @@ def train(epoch):
 
         s1_arr = np.hstack(s1_list)
         s2_arr = np.hstack(s2_list)
-    return loss_all / len(train_dataset), s1_arr, s2_arr ,w1,w2
+        train_acc = correct / max(total, 1)
+        progress.set_postfix(loss=f"{loss.item():.4f}", acc=f"{train_acc:.4f}")
+    return loss_all / len(train_dataset), train_acc, s1_arr, s2_arr ,w1,w2
 
 
 ###################### Network Testing Function#####################################
@@ -244,18 +255,15 @@ best_model_wts = copy.deepcopy(model.state_dict())
 best_loss = 1e10
 for epoch in range(0, num_epoch):
     since  = time.time()
-    tr_loss, s1_arr, s2_arr, w1, w2 = train(epoch)
-    tr_acc = test_acc(train_loader)
-    val_acc = test_acc(val_loader)
+    tr_loss, tr_acc, s1_arr, s2_arr, w1, w2 = train(epoch)
     val_loss = test_loss(val_loader,epoch)
     val_metrics = eval_metrics(val_loader)
     time_elapsed = time.time() - since
     print('*====**')
     print('{:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
     print('Epoch: {:03d}, Train Loss: {:.7f}, '
-          'Train Acc: {:.7f}, Test Loss: {:.7f}, Test Acc: {:.7f}'.format(epoch, tr_loss,
-                                                       tr_acc, val_loss, val_acc))
-    print('Metrics: Acc {:.4f}, AUC {:.4f}, Precision {:.4f}, Recall {:.4f}, F1 {:.4f}'.format(
+          'Train Acc: {:.7f}'.format(epoch, tr_loss, tr_acc))
+    print('Val Metrics: Acc {:.4f}, AUC {:.4f}, Precision {:.4f}, Recall {:.4f}, F1 {:.4f}'.format(
         val_metrics["acc"],
         val_metrics["auc"],
         val_metrics["precision"],
@@ -263,7 +271,7 @@ for epoch in range(0, num_epoch):
         val_metrics["f1"],
     ))
 
-    writer.add_scalars('Acc',{'train_acc':tr_acc,'val_acc':val_acc},  epoch)
+    writer.add_scalars('Acc',{'train_acc':tr_acc,'val_acc':val_metrics["acc"]},  epoch)
     writer.add_scalars('Loss', {'train_loss': tr_loss, 'val_loss': val_loss},  epoch)
     writer.add_histogram('Hist/hist_s1', s1_arr, epoch)
     writer.add_histogram('Hist/hist_s2', s2_arr, epoch)
