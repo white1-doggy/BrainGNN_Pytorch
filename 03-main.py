@@ -14,7 +14,7 @@ from imports.task_dataset import TaskGraphDataset, TASK_NAME_LIST
 from torch_geometric.data import DataLoader
 from net.braingnn import Network
 from imports.utils import train_val_test_split, train_val_test_split_indices
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
 
 torch.manual_seed(123)
 
@@ -207,6 +207,36 @@ def test_loss(loader,epoch):
         loss_all += loss.item() * data.num_graphs
     return loss_all / len(loader.dataset)
 
+
+def eval_metrics(loader):
+    model.eval()
+    all_probs = []
+    all_preds = []
+    all_trues = []
+    with torch.no_grad():
+        for data in loader:
+            data = data.to(device)
+            outputs = model(data.x, data.edge_index, data.batch, data.edge_attr, data.pos)
+            log_probs = outputs[0]
+            probs = torch.exp(log_probs)
+            preds = probs.argmax(dim=1)
+            all_probs.append(probs[:, 1].detach().cpu().numpy())
+            all_preds.append(preds.detach().cpu().numpy())
+            all_trues.append(data.y.detach().cpu().numpy())
+
+    y_true = np.concatenate(all_trues, axis=0)
+    y_pred = np.concatenate(all_preds, axis=0)
+    y_prob = np.concatenate(all_probs, axis=0)
+
+    metrics = {
+        "acc": accuracy_score(y_true, y_pred),
+        "auc": roc_auc_score(y_true, y_prob),
+        "precision": precision_score(y_true, y_pred, zero_division=0),
+        "recall": recall_score(y_true, y_pred, zero_division=0),
+        "f1": f1_score(y_true, y_pred, zero_division=0),
+    }
+    return metrics
+
 #######################################################################################
 ############################   Model Training #########################################
 #######################################################################################
@@ -218,12 +248,20 @@ for epoch in range(0, num_epoch):
     tr_acc = test_acc(train_loader)
     val_acc = test_acc(val_loader)
     val_loss = test_loss(val_loader,epoch)
+    val_metrics = eval_metrics(val_loader)
     time_elapsed = time.time() - since
     print('*====**')
     print('{:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
     print('Epoch: {:03d}, Train Loss: {:.7f}, '
           'Train Acc: {:.7f}, Test Loss: {:.7f}, Test Acc: {:.7f}'.format(epoch, tr_loss,
                                                        tr_acc, val_loss, val_acc))
+    print('Metrics: Acc {:.4f}, AUC {:.4f}, Precision {:.4f}, Recall {:.4f}, F1 {:.4f}'.format(
+        val_metrics["acc"],
+        val_metrics["auc"],
+        val_metrics["precision"],
+        val_metrics["recall"],
+        val_metrics["f1"],
+    ))
 
     writer.add_scalars('Acc',{'train_acc':tr_acc,'val_acc':val_acc},  epoch)
     writer.add_scalars('Loss', {'train_loss': tr_loss, 'val_loss': val_loss},  epoch)
