@@ -10,9 +10,10 @@ from torch.optim import lr_scheduler
 from tensorboardX import SummaryWriter
 
 from imports.ABIDEDataset import ABIDEDataset
+from imports.task_dataset import TaskGraphDataset, TASK_NAME_LIST
 from torch_geometric.data import DataLoader
 from net.braingnn import Network
-from imports.utils import train_val_test_split
+from imports.utils import train_val_test_split, train_val_test_split_indices
 from sklearn.metrics import classification_report, confusion_matrix
 
 torch.manual_seed(123)
@@ -46,6 +47,10 @@ parser.add_argument('--load_model', type=bool, default=False)
 parser.add_argument('--save_model', type=bool, default=True)
 parser.add_argument('--optim', type=str, default='Adam', help='optimization method: SGD, Adam')
 parser.add_argument('--save_path', type=str, default='./model/', help='path to save model')
+parser.add_argument('--dataset', type=str, default='abide', choices=['abide', 'task'], help='dataset type')
+parser.add_argument('--node_root', type=str, default='', help='root directory of node feature data')
+parser.add_argument('--edge_root', type=str, default='', help='root directory of edge weight data')
+parser.add_argument('--task_name', type=str, default='WM', choices=TASK_NAME_LIST, help='task name for binary classification')
 opt = parser.parse_args()
 
 if not os.path.exists(opt.save_path):
@@ -59,23 +64,32 @@ load_model = opt.load_model
 opt_method = opt.optim
 num_epoch = opt.n_epochs
 fold = opt.fold
-writer = SummaryWriter(os.path.join('./log',str(fold)))
+writer = SummaryWriter(os.path.join('./log', str(fold)))
 
 
 
 ################## Define Dataloader ##################################
 
-dataset = ABIDEDataset(path,name)
-dataset.data.y = dataset.data.y.squeeze()
-dataset.data.x[dataset.data.x == float('inf')] = 0
+if opt.dataset == 'abide':
+    dataset = ABIDEDataset(path, name)
+    dataset.data.y = dataset.data.y.squeeze()
+    dataset.data.x[dataset.data.x == float('inf')] = 0
 
-tr_index,val_index,te_index = train_val_test_split(fold=fold)
-train_dataset = dataset[tr_index]
-val_dataset = dataset[val_index]
-test_dataset = dataset[te_index]
+    tr_index, val_index, te_index = train_val_test_split(fold=fold)
+    train_dataset = dataset[tr_index]
+    val_dataset = dataset[val_index]
+    test_dataset = dataset[te_index]
+else:
+    if not opt.node_root or not opt.edge_root:
+        raise ValueError("node_root and edge_root must be provided for task dataset.")
+    dataset = TaskGraphDataset(opt.node_root, opt.edge_root, opt.task_name)
+    tr_index, val_index, te_index = train_val_test_split_indices(len(dataset), fold=fold)
+    train_dataset = [dataset[idx] for idx in tr_index]
+    val_dataset = [dataset[idx] for idx in val_index]
+    test_dataset = [dataset[idx] for idx in te_index]
 
 
-train_loader = DataLoader(train_dataset,batch_size=opt.batchSize, shuffle= True)
+train_loader = DataLoader(train_dataset, batch_size=opt.batchSize, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=opt.batchSize, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=opt.batchSize, shuffle=False)
 
@@ -240,7 +254,10 @@ if opt.load_model:
         preds.append(pred.cpu().detach().numpy())
         correct += pred.eq(data.y).sum().item()
     preds = np.concatenate(preds,axis=0)
-    trues = val_dataset.data.y.cpu().detach().numpy()
+    if opt.dataset == 'abide':
+        trues = val_dataset.data.y.cpu().detach().numpy()
+    else:
+        trues = np.array([int(data.y.item()) for data in val_dataset])
     cm = confusion_matrix(trues,preds)
     print("Confusion matrix")
     print(classification_report(trues, preds))
@@ -253,4 +270,3 @@ else:
    print("===========================")
    print("Test Acc: {:.7f}, Test Loss: {:.7f} ".format(test_accuracy, test_l))
    print(opt)
-

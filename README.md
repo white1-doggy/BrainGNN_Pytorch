@@ -29,6 +29,19 @@ Training and testing are integrated in file `main.py`. To run
 python 03-main.py 
 ```
 
+### Task-based binary classification
+For the seven-task dataset (WM, SOCIAL, EMOTION, MOTOR, LANGUAGE, RELATIONAL, GAMBLING),
+provide node and edge roots that follow the layout:
+```
+{node_root}/{subject_id}/{task}/{0 or 1}/{fc0.pt}
+{edge_root}/{subject_id}/{task}/{0 or 1}/{fc0.pt}
+```
+
+Run:
+```
+python 03-main.py --dataset task --node_root /path/to/node --edge_root /path/to/edge --task_name WM
+```
+
 
 ## Citation
 If you find the code and dataset useful, please cite our paper.
